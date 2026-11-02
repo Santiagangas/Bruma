@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
@@ -250,8 +252,10 @@ class Store {
       (data['meta'] as Map<String, dynamic>).forEach((k, v) {
         final mine = double.tryParse(current[k] ?? '');
         final theirs = double.tryParse('$v');
-        final take = mine == null ||
-            (!k.startsWith('last_') && theirs != null && theirs > mine);
+        final take = k.startsWith('note:')
+            ? (current[k] ?? '').isEmpty
+            : mine == null ||
+                (!k.startsWith('last_') && theirs != null && theirs > mine);
         if (take) {
           batch.insert('meta', {'key': k, 'value': '$v'},
               conflictAlgorithm: ConflictAlgorithm.replace);
@@ -259,6 +263,15 @@ class Store {
       });
       await batch.commit(noResult: true);
     });
+  }
+
+  /// Size of the database file in bytes (0 if unknown).
+  Future<int> sizeBytes() async {
+    try {
+      return await File(_db.path).length();
+    } catch (_) {
+      return 0;
+    }
   }
 
   Future<void> wipe() async {

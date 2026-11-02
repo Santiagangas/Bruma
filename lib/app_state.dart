@@ -18,22 +18,40 @@ const worldLandKm2 = 148940000.0;
 /// A place you passed through, in grid units (see [Cells]), with the radius
 /// of fog it clears, also in grid units.
 class FogPoint {
-  FogPoint(double lat, double lon)
+  FogPoint(double lat, double lon, {this.born})
       : x = Cells.lonToX(lon),
         y = Cells.latToY(lat),
         r = Cells.revealRadius / Cells.cellSizeMeters(lat);
   final double x;
   final double y;
   final double r;
+
+  /// When it was revealed during this run (null for loaded points); used to
+  /// animate the circle opening.
+  final DateTime? born;
 }
 
 enum EventKind { badge, place, level, city }
 
 class GameEvent {
-  GameEvent(this.kind, this.title, this.subtitle);
+  GameEvent(this.kind, {this.poi, this.badge, this.city, this.level, this.xp = 0});
   final EventKind kind;
-  final String title;
-  final String subtitle;
+  final Poi? poi;
+  final Achievement? badge;
+  final City? city;
+  final int? level;
+  final int xp;
+}
+
+/// Where the XP total comes from (shown on the level-up screen).
+class XpBreakdown {
+  const XpBreakdown(this.cells, this.places, this.extras);
+  final int cells;
+  final int places;
+
+  /// Cities and badges.
+  final int extras;
+  int get total => cells + places + extras;
 }
 
 /// Counts explored cells per city. Runs in a background isolate because it
@@ -84,6 +102,14 @@ class AppState extends ChangeNotifier {
   double distanceM = 0;
   int nightCells = 0;
   int earlyCells = 0;
+  int sessions = 0;
+  double walkSeconds = 0;
+
+  /// Metres walked per day ("yyyy-mm-dd").
+  final Map<String, double> dayMeters = {};
+
+  /// Your notes about discovered places, by place id.
+  final Map<String, String> notes = {};
 
   bool ready = false;
   bool tracking = false;
@@ -91,6 +117,27 @@ class AppState extends ChangeNotifier {
   LatLng? lastKnown;
   double? accuracy;
   City? currentCity;
+
+  /// Direction of travel in degrees, when moving.
+  double? heading;
+  bool moving = false;
+
+  // Current exploration session.
+  DateTime? sessionStart;
+  double sessionMeters = 0;
+  int sessionCells = 0;
+  int sessionXpStart = 0;
+
+  /// XP gained by the latest fix (for the "+4 XP" bubble); bumps each time.
+  final ValueNotifier<(int, int)> gain = ValueNotifier((0, 0));
+
+  /// Asks the map to fly to a point (from Descubrir or a place card). The
+  /// number changes on every request.
+  final ValueNotifier<(int, LatLng)?> focus = ValueNotifier(null);
+  void focusOn(LatLng p) => focus.value = ((focus.value?.$1 ?? 0) + 1, p);
+
+  /// Last time a map tile failed to load (no connection).
+  final ValueNotifier<DateTime?> tileError = ValueNotifier(null);
 
   final _events = StreamController<GameEvent>.broadcast();
   Stream<GameEvent> get events => _events.stream;
@@ -116,6 +163,9 @@ class AppState extends ChangeNotifier {
   Future<void> init() async {
     await _store.open();
     await _loadAll();
+    // Award badges already earned with existing progress, without a
+    // celebration for each one.
+    await _checkBadges(DateTime.now(), silent: true);
     ready = true;
     notifyListeners();
   }
@@ -131,6 +181,8 @@ class AppState extends ChangeNotifier {
     cityCells.clear();
     unlocked.clear();
     days.clear();
+    dayMeters.clear();
+    notes.clear();
 
     final cellList = await _store.loadCells();
     _addToMemory(cellList);
@@ -143,12 +195,23 @@ class AppState extends ChangeNotifier {
     _poiTiles.addAll(await _store.loadPoiTiles());
     cities.addAll(await _store.loadCities());
     unlocked.addAll(await _store.loadBadges());
+    // Badges from older versions of the app no longer exist.
+    unlocked.removeWhere((id, _) => badgeById(id) == null);
     days.addAll(await _store.loadDays());
 
     final meta = await _store.loadMeta();
     distanceM = double.tryParse(meta['distance_m'] ?? '') ?? 0;
     nightCells = int.tryParse(meta['night_cells'] ?? '') ?? 0;
     earlyCells = int.tryParse(meta['early_cells'] ?? '') ?? 0;
+    sessions = int.tryParse(meta['sessions'] ?? '') ?? 0;
+    walkSeconds = double.tryParse(meta['walk_s'] ?? '') ?? 0;
+    meta.forEach((k, v) {
+      if (k.startsWith('dist:')) {
+        dayMeters[k.substring(5)] = double.tryParse(v) ?? 0;
+      } else if (k.startsWith('note:') && v.isNotEmpty) {
+        notes[k.substring(5)] = v;
+      }
+    });
     final lat = double.tryParse(meta['last_lat'] ?? '');
     final lon = double.tryParse(meta['last_lon'] ?? '');
     if (lat != null && lon != null) lastKnown = LatLng(lat, lon);
@@ -163,10 +226,10 @@ class AppState extends ChangeNotifier {
   }
 
   /// Adds a fog point unless its cell already has one. Returns true if added.
-  bool _addPoint(double lat, double lon) {
+  bool _addPoint(double lat, double lon, {DateTime? born}) {
     final key = Cells.keyAt(lat, lon);
     if (!_pointCells.add(key)) return false;
-    (fogBuckets[Cells.bucketOf(key)] ??= []).add(FogPoint(lat, lon));
+    (fogBuckets[Cells.bucketOf(key)] ??= []).add(FogPoint(lat, lon, born: born));
     return true;
   }
 
@@ -182,22 +245,64 @@ class AppState extends ChangeNotifier {
 
   int get discoveredCount => pois.values.where((p) => p.discovered != null).length;
 
-  int get xp =>
-      cells.length +
-      50 * discoveredCount +
-      200 * cities.length +
-      100 * unlocked.length;
+  XpBreakdown get xpBreakdown {
+    var places = 0;
+    for (final p in pois.values) {
+      if (p.discovered != null) places += p.info.xp;
+    }
+    return XpBreakdown(cells.length, places,
+        xpPerCity * cities.length + xpPerBadge * unlocked.length);
+  }
+
+  int get xp => xpBreakdown.total;
 
   int get level => levelFor(xp);
 
-  double get exploredKm2 {
-    final lat = (position ?? lastKnown)?.latitude ?? 0;
-    return cells.length * Cells.cellAreaM2(lat) / 1e6;
-  }
+  double get _cellArea => Cells.cellAreaM2((position ?? lastKnown)?.latitude ?? 0);
+
+  double get exploredKm2 => cells.length * _cellArea / 1e6;
 
   double get worldPercent => exploredKm2 / worldLandKm2 * 100;
 
   double cityPercent(City c) => c.percent(cityCells[c.id] ?? 0);
+
+  double cityKm2(City c) =>
+      (cityCells[c.id] ?? 0) * Cells.cellAreaM2(c.shape.centerLat) / 1e6;
+
+  /// Places inside [c]: (discovered, total).
+  (int, int) placesIn(City c) {
+    var found = 0, total = 0;
+    for (final p in pois.values) {
+      if (!c.shape.contains(p.lat, p.lon)) continue;
+      total++;
+      if (p.discovered != null) found++;
+    }
+    return (found, total);
+  }
+
+  /// Order in which [poi] was discovered (1 = first).
+  int discoveryNumber(Poi poi) {
+    final at = poi.discovered;
+    if (at == null) return 0;
+    return pois.values
+        .where((p) => p.discovered != null && p.discovered! <= at)
+        .length;
+  }
+
+  /// The city containing a point, among those already known.
+  City? cityAt(double lat, double lon) {
+    for (final c in cities) {
+      if (c.shape.contains(lat, lon)) return c;
+    }
+    return null;
+  }
+
+  /// First day with exploration, if any.
+  DateTime? get firstDay {
+    if (days.isEmpty) return null;
+    final first = days.keys.reduce((a, b) => a.compareTo(b) <= 0 ? a : b);
+    return DateTime.tryParse(first);
+  }
 
   Stats get stats {
     final byCat = <String, int>{};
@@ -207,27 +312,65 @@ class AppState extends ChangeNotifier {
       }
     }
     var maxPct = 0.0;
+    String? maxName;
+    var completed = 0;
     for (final c in cities) {
       final pct = cityPercent(c);
-      if (pct > maxPct) maxPct = pct;
-    }
-    var bestDay = 0;
-    for (final v in days.values) {
-      if (v > bestDay) bestDay = v;
+      if (pct >= completedCityPercent) completed++;
+      if (maxName == null || pct > maxPct) {
+        maxPct = pct;
+        maxName = c.name;
+      }
     }
     return Stats(
       cells: cells.length,
+      km2: exploredKm2,
       distanceKm: distanceM / 1000,
       pois: discoveredCount,
       poisByCategory: byCat,
       cities: cities.length,
       maxCityPercent: maxPct,
+      maxCityName: maxName,
+      completedCities: completed,
       bestStreak: bestStreak(days),
-      bestDay: bestDay,
+      currentStreak: currentStreak(days),
+      activeDays: days.values.where((v) => v >= streakMinCells).length,
+      sessions: sessions,
       nightCells: nightCells,
       earlyCells: earlyCells,
     );
   }
+
+  /// Locked badge closest to being unlocked.
+  Achievement? get nextBadge {
+    final s = stats;
+    Achievement? best;
+    var bestP = -1.0;
+    for (final b in badges) {
+      if (unlocked.containsKey(b.id)) continue;
+      final p = b.progress(s);
+      if (p > bestP) {
+        bestP = p;
+        best = b;
+      }
+    }
+    return best;
+  }
+
+  Future<void> setNote(Poi poi, String text) async {
+    final t = text.trim();
+    if (t.isEmpty) {
+      notes.remove(poi.id);
+    } else {
+      notes[poi.id] = t;
+    }
+    await _store.saveProgress(
+        newCells: const [], ts: 0, day: '', meta: {'note:${poi.id}': t});
+    notifyListeners();
+  }
+
+  /// Size of the progress database, in bytes.
+  Future<int> databaseBytes() => _store.sizeBytes();
 
   // --------------------------------------------------------------- tracking
 
@@ -247,7 +390,9 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  Future<String?> startTracking() async {
+  /// Starts an exploration session. With [background] the phone keeps
+  /// exploring with the screen off (shows a fixed notification).
+  Future<String?> startTracking({bool background = true}) async {
     if (tracking) return null;
     final error = await _ensurePermission();
     if (error != null) return error;
@@ -255,14 +400,20 @@ class AppState extends ChangeNotifier {
       accuracy: LocationAccuracy.best,
       distanceFilter: 5,
       intervalDuration: const Duration(seconds: 2),
-      foregroundNotificationConfig: const ForegroundNotificationConfig(
-        notificationTitle: 'Bruma está explorando',
-        notificationText: 'Despejando la niebla a tu paso',
-        notificationChannelName: 'Exploración',
-        enableWakeLock: true,
-        setOngoing: true,
-      ),
+      foregroundNotificationConfig: background
+          ? const ForegroundNotificationConfig(
+              notificationTitle: 'Bruma está explorando',
+              notificationText: 'Despejando la niebla a tu paso',
+              notificationChannelName: 'Exploración',
+              enableWakeLock: true,
+              setOngoing: true,
+            )
+          : null,
     );
+    sessionStart = DateTime.now();
+    sessionMeters = 0;
+    sessionCells = 0;
+    sessionXpStart = xp;
     _lastFix = null;
     _sub = Geolocator.getPositionStream(locationSettings: settings).listen(
       (p) => _chain = _chain.then((_) => _onFix(p)).catchError((Object e) {
@@ -281,8 +432,13 @@ class AppState extends ChangeNotifier {
   Future<void> stopTracking() async {
     await _sub?.cancel();
     _sub = null;
+    if (!tracking) return;
     tracking = false;
+    sessionStart = null;
+    moving = false;
+    sessions++;
     await _saveMeta();
+    await _checkBadges(DateTime.now());
     notifyListeners();
   }
 
@@ -303,6 +459,8 @@ class AppState extends ChangeNotifier {
     final here = LatLng(p.latitude, p.longitude);
     position = here;
     accuracy = p.accuracy;
+    moving = p.speed > 0.5;
+    if (moving && p.heading >= 0) heading = p.heading;
     // Fixes this imprecise would reveal places you never went.
     if (p.accuracy > 40) {
       notifyListeners();
@@ -310,11 +468,12 @@ class AppState extends ChangeNotifier {
     }
 
     final levelBefore = level;
+    final xpBefore = xp;
     final now = DateTime.now();
     final fresh = <int>{};
     final freshPoints = <(double, double)>[];
     void reveal(LatLng q) {
-      if (_addPoint(q.latitude, q.longitude)) {
+      if (_addPoint(q.latitude, q.longitude, born: now)) {
         freshPoints.add((q.latitude, q.longitude));
       }
       for (final k in Cells.around(q, Cells.revealRadius)) {
@@ -336,6 +495,10 @@ class AppState extends ChangeNotifier {
               from.longitude + (here.longitude - from.longitude) * t));
         }
         distanceM += d;
+        sessionMeters += d;
+        final day = dayKey(now);
+        dayMeters[day] = (dayMeters[day] ?? 0) + d;
+        if (d > 1) walkSeconds += dt;
       } else {
         reveal(here);
       }
@@ -351,8 +514,9 @@ class AppState extends ChangeNotifier {
       _addToMemory(fresh);
       final day = dayKey(now);
       if (fresh.isNotEmpty) days[day] = (days[day] ?? 0) + fresh.length;
-      if (now.hour < 5) nightCells += fresh.length;
-      if (now.hour >= 5 && now.hour < 7) earlyCells += fresh.length;
+      sessionCells += fresh.length;
+      if (now.hour >= 22 || now.hour < 4) nightCells += fresh.length;
+      if (now.hour >= 4 && now.hour < 8) earlyCells += fresh.length;
       for (final c in cities) {
         for (final k in fresh) {
           if (c.shape.containsCell(k)) {
@@ -379,19 +543,27 @@ class AppState extends ChangeNotifier {
     await _checkBadges(now);
     final levelAfter = level;
     if (levelAfter > levelBefore) {
-      _events.add(GameEvent(EventKind.level, '¡Nivel $levelAfter!',
-          titleFor(levelAfter)));
+      _events.add(GameEvent(EventKind.level, level: levelAfter));
     }
+    final gained = xp - xpBefore;
+    if (gained > 0) gain.value = (gain.value.$1 + 1, gained);
     notifyListeners();
   }
 
-  Map<String, String> _metaValues() => {
+  Map<String, String> _metaValues() {
+    final today = dayKey(DateTime.now());
+    return {
         'distance_m': distanceM.toStringAsFixed(1),
         'night_cells': '$nightCells',
         'early_cells': '$earlyCells',
+        'sessions': '$sessions',
+        'walk_s': walkSeconds.toStringAsFixed(0),
+        if (dayMeters[today] != null)
+          'dist:$today': dayMeters[today]!.toStringAsFixed(1),
         if (lastKnown != null) 'last_lat': '${lastKnown!.latitude}',
         if (lastKnown != null) 'last_lon': '${lastKnown!.longitude}',
       };
+  }
 
   Future<void> _saveMeta() async {
     _lastMetaSave = DateTime.now();
@@ -408,8 +580,7 @@ class AppState extends ChangeNotifier {
       if (quickDistance(poi.point, here) <= poi.discoverRadius) {
         poi.discovered = now.millisecondsSinceEpoch;
         await _store.markDiscovered(poi.id, poi.discovered!);
-        _events.add(GameEvent(EventKind.place, '¡Lugar descubierto!',
-            '${poi.name} · ${poi.info.label}  (+50 XP)'));
+        _events.add(GameEvent(EventKind.place, poi: poi, xp: poi.info.xp));
       }
     }
   }
@@ -488,8 +659,7 @@ class AppState extends ChangeNotifier {
       cities.add(city);
       cityCells[city.id] = counts[city.id] ?? 0;
       _updateCurrentCity(here);
-      _events.add(GameEvent(
-          EventKind.city, 'Nueva ciudad: ${city.name}', '+200 XP'));
+      _events.add(GameEvent(EventKind.city, city: city, xp: xpPerCity));
       await _checkBadges(DateTime.now());
       notifyListeners();
     } catch (e) {
@@ -501,14 +671,13 @@ class AppState extends ChangeNotifier {
 
   // ----------------------------------------------------------------- badges
 
-  Future<void> _checkBadges(DateTime now) async {
+  Future<void> _checkBadges(DateTime now, {bool silent = false}) async {
     final s = stats;
     for (final b in badges) {
       if (unlocked.containsKey(b.id) || !b.test(s)) continue;
       unlocked[b.id] = now.millisecondsSinceEpoch;
       await _store.addBadge(b.id, now.millisecondsSinceEpoch);
-      _events.add(GameEvent(EventKind.badge, 'Insignia: ${b.name}',
-          '${b.description}  (+100 XP)'));
+      if (!silent) _events.add(GameEvent(EventKind.badge, badge: b, xp: xpPerBadge));
     }
   }
 
@@ -530,6 +699,8 @@ class AppState extends ChangeNotifier {
     distanceM = 0;
     nightCells = 0;
     earlyCells = 0;
+    sessions = 0;
+    walkSeconds = 0;
     lastKnown = null;
     currentCity = null;
     _cityMisses.clear();

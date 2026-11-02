@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Bruma background (#101714), shown while the app starts. -->
+    <color name="bruma_bg">#101714</color>
+</resources>
