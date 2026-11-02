@@ -1,189 +1,245 @@
-import 'dart:io';
-
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../app_state.dart';
 import '../game/progress.dart';
+import '../settings.dart';
+import 'format.dart';
+import 'icons.dart';
+import 'theme.dart';
+import 'widgets.dart';
 
+/// "Progreso": level, explored share of your city and of the world, and
+/// figures per city.
 class ProgressScreen extends StatelessWidget {
-  const ProgressScreen({super.key, required this.state});
+  const ProgressScreen(
+      {super.key, required this.state, required this.settings, required this.onOpenStats});
   final AppState state;
-
-  void _toast(BuildContext context, String text) => ScaffoldMessenger.of(context)
-      .showSnackBar(SnackBar(content: Text(text)));
-
-  Future<void> _export(BuildContext context) async {
-    try {
-      final json = await state.exportJson();
-      final dir = await getTemporaryDirectory();
-      final now = DateTime.now();
-      final file = File(p.join(dir.path,
-          'bruma-respaldo-${now.year}-${now.month}-${now.day}.json'));
-      await file.writeAsString(json);
-      await SharePlus.instance.share(ShareParams(
-          files: [XFile(file.path)], title: 'Respaldo de Bruma'));
-    } catch (e) {
-      if (context.mounted) _toast(context, 'No se pudo exportar: $e');
-    }
-  }
-
-  Future<void> _import(BuildContext context) async {
-    try {
-      final files = await FilePicker.pickFiles(type: FileType.any);
-      final path = files.isEmpty ? null : files.first.path;
-      if (path == null) return;
-      await state.importJson(await File(path).readAsString());
-      if (context.mounted) _toast(context, 'Respaldo importado.');
-    } catch (e) {
-      if (context.mounted) _toast(context, 'No se pudo importar: $e');
-    }
-  }
-
-  Future<void> _wipe(BuildContext context) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('¿Borrar todo?'),
-        content: const Text(
-            'Se borrarán el mapa explorado, los lugares, las insignias y el '
-            'nivel. No se puede deshacer. Exporta un respaldo antes si '
-            'quieres conservarlo.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancelar')),
-          FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Borrar')),
-        ],
-      ),
-    );
-    if (ok == true) {
-      await state.wipe();
-      if (context.mounted) _toast(context, 'Datos borrados.');
-    }
-  }
+  final Settings settings;
+  final VoidCallback onOpenStats;
 
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: state,
-      builder: (context, _) {
-        final s = state.stats;
-        final km2 = state.exploredKm2;
-        final text = Theme.of(context).textTheme;
-        return Scaffold(
-          appBar: AppBar(title: const Text('Progreso')),
-          body: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: [
-                  _Stat('Área explorada', '${km2.toStringAsFixed(3)} km²'),
-                  _Stat('Celdas despejadas', '${s.cells}'),
-                  _Stat('Distancia', '${s.distanceKm.toStringAsFixed(1)} km'),
-                  _Stat('Lugares', '${s.pois}'),
-                  _Stat('Mejor racha', '${s.bestStreak} días'),
-                  _Stat('Días explorando', '${state.days.length}'),
-                  _Stat('Del mundo', formatPercent(state.worldPercent)),
-                ],
+      listenable: Listenable.merge([state, settings]),
+      builder: (context, _) => _build(context),
+    );
+  }
+
+  Widget _build(BuildContext context) {
+    final s = state;
+    final xp = s.xp;
+    final lvl = levelFor(xp);
+    final from = xpForLevel(lvl), to = xpForLevel(lvl + 1);
+    final st = s.stats;
+    final cities = [...s.cities]..sort((a, b) => s.cityPercent(b).compareTo(s.cityPercent(a)));
+    final main = s.currentCity ?? (cities.isEmpty ? null : cities.first);
+    final (dist, unit) = settings.distance(st.distanceKm);
+    final top = MediaQuery.paddingOf(context).top;
+
+    Widget cell(String v, String label, {Color color = Br.text}) => Container(
+          color: Br.bg,
+          height: 72,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(v,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: BrText.display(26, height: 1.05, color: color)),
+            const SizedBox(height: 2),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(label, maxLines: 1, style: BrText.ui(11.5, color: Br.textMuted)),
+            ),
+          ]),
+        );
+
+    return Stack(children: [
+      ListView(
+        padding: EdgeInsets.fromLTRB(20, top + 28, 20, 120),
+        children: [
+          Row(children: [
+            Text('Progreso', style: BrText.display(40)),
+            const Spacer(),
+            Material(
+              color: Colors.transparent,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: const BorderSide(color: Br.outline)),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: onOpenStats,
+                child: Container(
+                  height: 40,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  child: Row(children: [
+                    const BrIcon(BrIcons.stats, size: 16, color: Br.green, stroke: 2),
+                    const SizedBox(width: 6),
+                    Text('Estadísticas',
+                        style: BrText.ui(13, weight: FontWeight.w700, color: Br.green)),
+                  ]),
+                ),
               ),
-              const SizedBox(height: 24),
-              Text('Ciudades', style: text.titleLarge),
-              const SizedBox(height: 8),
-              if (state.cities.isEmpty)
-                const Text('Explora para identificar tu primera ciudad.'),
-              for (final c in state.cities)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+            ),
+          ]),
+          const SizedBox(height: 14),
+
+          // Level.
+          SurfaceCard(
+            radius: 24,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+            child: Row(children: [
+              Column(children: [
+                Text('NIVEL', style: BrText.mono(10, tracking: .14)),
+                Text('$lvl', style: BrText.display(64)),
+              ]),
+              const SizedBox(width: 18),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(titleFor(lvl), style: BrText.ui(15, weight: FontWeight.w700)),
+                  const SizedBox(height: 8),
+                  BrBar(value: (xp - from) / (to - from)),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Text('${fmtInt(xp - from)} / ${fmtInt(to - from)} XP',
+                        style: BrText.mono(12, color: Br.textSoft)),
+                    const Spacer(),
+                    Text('${fmtInt(to - xp)} para el ${lvl + 1}',
+                        style: BrText.ui(12, color: Br.textMuted)),
+                  ]),
+                ]),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 14),
+
+          // Shares.
+          IntrinsicHeight(
+            child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(
+                child: SurfaceCard(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(main == null ? 'Municipio' : 'Municipio · ${main.name}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: BrText.ui(12, color: Br.textMuted)),
+                    const SizedBox(height: 4),
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(main == null ? '—' : fmtPercent(s.cityPercent(main)),
+                          style: BrText.display(40, color: Br.green)),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                        main == null
+                            ? 'Explora para identificarlo'
+                            : '${fmtDec(s.cityKm2(main))} km² explorados',
+                        style: BrText.ui(11.5, color: Br.textMuted)),
+                  ]),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: SurfaceCard(
+                  color: settingsFog(settings),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('El mundo', style: BrText.ui(12, color: Br.textOnFog)),
+                    const SizedBox(height: 4),
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(fmtPercent(s.worldPercent),
+                          style: BrText.display(25, height: 1.25)),
+                    ),
+                    const SizedBox(height: 4),
+                    Text('Queda mucha niebla.',
+                        style: BrText.ui(11.5, color: Br.textOnFog, style: FontStyle.italic)),
+                  ]),
+                ),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 14),
+
+          // Figures.
+          ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: Container(
+              color: const Color(0x12F0F1E9),
+              child: Column(children: [
+                Row(children: [
+                  Expanded(child: cell(fmtDec(st.km2), 'km² descubiertos')),
+                  const SizedBox(width: 1),
+                  Expanded(child: cell(fmtDec(dist, 1), '$unit recorridos')),
+                  const SizedBox(width: 1),
+                  Expanded(child: cell('${st.pois}', 'lugares', color: Br.gold)),
+                ]),
+                const SizedBox(height: 1),
+                Row(children: [
+                  Expanded(child: cell('${s.days.length}', 'días explorados')),
+                  const SizedBox(width: 1),
+                  Expanded(child: cell('${st.bestStreak}', 'mejor racha')),
+                  const SizedBox(width: 1),
+                  Expanded(child: cell('${st.currentStreak}', 'racha actual')),
+                ]),
+              ]),
+            ),
+          ),
+          const SizedBox(height: 18),
+
+          // Cities.
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text('Por ciudad', style: BrText.ui(17, weight: FontWeight.w700)),
+              const Spacer(),
+              Text(cities.length == 1 ? '1 municipio' : '${cities.length} municipios',
+                  style: BrText.ui(12, color: Br.textMuted)),
+            ],
+          ),
+          const SizedBox(height: 14),
+          if (cities.isEmpty)
+            Text('Explora para identificar tu primera ciudad.',
+                style: BrText.ui(13, color: Br.textMuted)),
+          for (final c in cities)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: Opacity(
+                opacity: s.cityPercent(c) < 0.05 ? .6 : 1,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
                     children: [
-                      Row(children: [
-                        Expanded(child: Text(c.name, style: text.titleMedium)),
-                        Text(formatPercent(state.cityPercent(c))),
-                      ]),
-                      const SizedBox(height: 6),
-                      LinearProgressIndicator(
-                        value: state.cityPercent(c) / 100,
-                        minHeight: 6,
-                        borderRadius: BorderRadius.circular(3),
+                      Expanded(
+                        child: Text(c.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: BrText.ui(15, weight: FontWeight.w700)),
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                          '${(c.area / 1e6).toStringAsFixed(1)} km² en total',
-                          style: text.bodySmall),
+                      Text(fmtPercent(s.cityPercent(c)), style: BrText.display(20)),
                     ],
                   ),
-                ),
-              const SizedBox(height: 24),
-              Text('Tus datos', style: text.titleLarge),
-              const SizedBox(height: 4),
-              Text(
-                'Todo se guarda solo en este teléfono. Exporta un respaldo de '
-                'vez en cuando para no perder tu progreso si cambias de '
-                'teléfono o desinstalas la app.',
-                style: text.bodySmall,
+                  const SizedBox(height: 6),
+                  BrBar(value: s.cityPercent(c) / 100, height: 4, color: Br.green, minWidth: 8),
+                  if (s.cityPercent(c) >= 0.05) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                        '${fmtDec(s.cityKm2(c))} km² explorados de ~${fmtInt(c.area / 1e6)} km²',
+                        style: BrText.ui(12, color: Br.textMuted)),
+                  ],
+                ]),
               ),
-              const SizedBox(height: 12),
-              Wrap(spacing: 12, runSpacing: 12, children: [
-                FilledButton.tonalIcon(
-                  onPressed: () => _export(context),
-                  icon: const Icon(Icons.upload_file),
-                  label: const Text('Exportar respaldo'),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: () => _import(context),
-                  icon: const Icon(Icons.download),
-                  label: const Text('Importar respaldo'),
-                ),
-                TextButton.icon(
-                  onPressed: () => _wipe(context),
-                  icon: const Icon(Icons.delete_forever,
-                      color: Colors.redAccent),
-                  label: const Text('Borrar todo',
-                      style: TextStyle(color: Colors.redAccent)),
-                ),
-              ]),
-              const SizedBox(height: 32),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _Stat extends StatelessWidget {
-  const _Stat(this.label, this.value);
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    return SizedBox(
-      width: 160,
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(value, style: text.titleLarge),
-              const SizedBox(height: 4),
-              Text(label, style: text.bodySmall),
-            ],
-          ),
-        ),
+            ),
+        ],
       ),
-    );
+      const Positioned(left: 0, right: 0, bottom: 0, child: BottomFade()),
+    ]);
   }
 }
+
+Color settingsFog(Settings s) => s.fog.color;

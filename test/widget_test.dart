@@ -1,6 +1,7 @@
 import 'package:bruma/game/progress.dart';
 import 'package:bruma/geo/cells.dart';
 import 'package:bruma/geo/shape.dart';
+import 'package:bruma/ui/format.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -35,8 +36,25 @@ void main() {
   });
 
   test('percent formatting keeps tiny values readable', () {
-    expect(formatPercent(12.5), '12.50 %');
-    expect(formatPercent(0.0000213), '0.000021 %');
-    expect(formatPercent(0), '0 %');
+    expect(fmtPercent(4.8213), '4,82 %');
+    expect(fmtPercent(0.00000056), '0,00000056 %');
+    expect(fmtPercent(0), '0,00 %');
+  });
+
+  test('spanish number formatting', () {
+    expect(fmtInt(3420), '3 420');
+    expect(fmtDec(186.4, 1), '186,4');
+    expect(fmtDec(1234.5, 1), '1 234,5');
+  });
+
+  test('current streak counts back from today', () {
+    final now = DateTime(2026, 11, 2);
+    final days = {
+      dayKey(DateTime(2026, 10, 31)): 30,
+      dayKey(DateTime(2026, 11, 1)): 30,
+      dayKey(DateTime(2026, 11, 2)): 2,
+    };
+    expect(currentStreak(days, now), 2);
+    expect(badges.length, 28);
   });
 }

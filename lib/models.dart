@@ -1,26 +1,41 @@
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'geo/cells.dart';
 import 'geo/shape.dart';
+import 'ui/icons.dart';
 
 class PoiCategory {
-  const PoiCategory(this.label, this.icon, this.color);
+  const PoiCategory(this.label, this.plural, this.icon, this.teaser, this.xp);
   final String label;
-  final IconData icon;
-  final Color color;
+  final String plural;
+
+  /// One of [BrIcons].
+  final String icon;
+
+  /// How the place is hinted at while it is still a mystery.
+  final String teaser;
+
+  /// XP for discovering it.
+  final int xp;
 }
 
 const poiCategories = <String, PoiCategory>{
-  'monumento': PoiCategory('Monumento', Icons.account_balance, Color(0xFFE0A458)),
-  'mirador': PoiCategory('Mirador', Icons.landscape, Color(0xFF6EC6CA)),
-  'museo': PoiCategory('Museo', Icons.museum, Color(0xFFB388FF)),
-  'arte': PoiCategory('Arte', Icons.palette, Color(0xFFFF8A80)),
-  'parque': PoiCategory('Parque', Icons.park, Color(0xFF81C784)),
-  'naturaleza': PoiCategory('Naturaleza', Icons.terrain, Color(0xFFA5D6A7)),
-  'atraccion': PoiCategory('Atracción', Icons.star, Color(0xFFFFD54F)),
+  'monumento': PoiCategory('Monumento', 'Monumentos', BrIcons.monument,
+      'Un monumento escondido', 100),
+  'mirador': PoiCategory(
+      'Mirador', 'Miradores', BrIcons.viewpoint, 'Un mirador te espera', 150),
+  'museo': PoiCategory(
+      'Museo', 'Museos', BrIcons.museum, 'Un museo por descubrir', 100),
+  'arte': PoiCategory(
+      'Arte', 'Arte', BrIcons.art, 'Una obra de arte oculta', 80),
+  'parque': PoiCategory(
+      'Parque', 'Parques', BrIcons.park, 'Un parque entre la niebla', 60),
+  'naturaleza': PoiCategory('Natural', 'Naturales', BrIcons.nature,
+      'Un rincón natural', 100),
+  'historico': PoiCategory('Sitio histórico', 'Históricos', BrIcons.historic,
+      'Un sitio con historia', 120),
 };
 
 class Poi {
@@ -43,7 +58,9 @@ class Poi {
   int? discovered;
 
   LatLng get point => LatLng(lat, lon);
-  PoiCategory get info => poiCategories[category] ?? poiCategories['atraccion']!;
+  // Older data used 'atraccion' for tourist attractions.
+  PoiCategory get info =>
+      poiCategories[category] ?? poiCategories['monumento']!;
 
   /// Big areas (parks, reserves) are mapped to their centre, so they get a
   /// wider discovery radius.

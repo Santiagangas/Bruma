@@ -171,8 +171,15 @@ class OsmClient {
     if (t['natural'] != null) return 'naturaleza';
     if (t['leisure'] == 'nature_reserve') return 'naturaleza';
     if (t['leisure'] == 'park' || t['leisure'] == 'garden') return 'parque';
-    if (t['historic'] != null) return 'monumento';
-    if (tourism == 'attraction') return 'atraccion';
+    final historic = t['historic'];
+    if (historic == 'monument' ||
+        historic == 'memorial' ||
+        historic == 'statue' ||
+        historic == 'obelisk') {
+      return 'monumento';
+    }
+    if (historic != null) return 'historico';
+    if (tourism == 'attraction') return 'monumento';
     return null;
   }
 }
